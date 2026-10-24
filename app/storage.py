@@ -74,6 +74,7 @@ def _row_to_task(row: sqlite3.Row) -> Dict[str, Any]:
         "artifacts": json.loads(row["artifacts_json"] or "[]"),
         "createdAt": row["created_at"],
         "updatedAt": row["updated_at"],
+        "_principal": row["principal"],
     }
     if row["batch_id"]:
         task["batchId"] = row["batch_id"]
