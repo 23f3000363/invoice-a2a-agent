@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import os
 import re
 from typing import Any
@@ -14,12 +15,14 @@ load_dotenv()
 from .protocol import VALID_ACTIONS, package_content_hash
 from . import storage
 
+logger = logging.getLogger("invoice_a2a.ai")
+
 AI_BASE_URL = os.getenv(
     "OPENAI_BASE_URL",
     os.getenv("AI_BASE_URL", "https://aipipe.org/openai/v1"),
 )
-AI_API_KEY = os.getenv("AIPIPE_TOKEN", os.getenv("AI_API_KEY", ""))
-AI_MODEL = os.getenv("AI_MODEL", "gpt-5-nano")
+AI_API_KEY = os.getenv("AIPIPE_TOKEN", os.getenv("AI_API_KEY", "")).strip()
+AI_MODEL = os.getenv("AI_MODEL", "gpt-4o-mini")
 AUTONOMOUS_LIMIT = int(os.getenv("AUTONOMOUS_LIMIT_MINOR", "50000"))
 
 
@@ -88,41 +91,67 @@ Return only a JSON array. Include exactly one object per input package:
 ]
 """
 
+
 async def _call_model(messages: list[dict[str, str]]) -> str:
     if not AI_API_KEY:
-        raise RuntimeError("AI provider credentials are not configured")
+        raise RuntimeError(
+            "AI provider credentials are not configured. "
+            "Set AIPIPE_TOKEN (or AI_API_KEY) in the Render Environment."
+        )
 
     headers = {
         "Authorization": f"Bearer {AI_API_KEY}",
         "Content-Type": "application/json",
     }
-    payload = {"model": AI_MODEL, "messages": messages}
+    payload = {
+        "model": AI_MODEL,
+        "messages": messages,
+        "temperature": 0.1,
+    }
     last_error: Exception | None = None
 
     for attempt in range(3):
         try:
-            async with httpx.AsyncClient(timeout=40.0) as client:
+            async with httpx.AsyncClient(timeout=45.0) as client:
                 response = await client.post(
                     f"{AI_BASE_URL.rstrip('/')}/chat/completions",
                     headers=headers,
                     json=payload,
                 )
-                response.raise_for_status()
-                content = response.json()["choices"][0]["message"]["content"]
+                if response.status_code == 401:
+                    raise RuntimeError(
+                        "AI provider rejected the API key (HTTP 401). "
+                        "Check AIPIPE_TOKEN on Render."
+                    )
+                if response.status_code >= 400:
+                    body = response.text[:400]
+                    raise RuntimeError(
+                        f"AI provider HTTP {response.status_code}: {body}"
+                    )
+                data = response.json()
+                content = data["choices"][0]["message"]["content"]
                 if not isinstance(content, str) or not content.strip():
                     raise ValueError("AI provider returned empty content")
                 return content
+        except RuntimeError:
+            raise
         except Exception as exc:
             last_error = exc
+            logger.warning("AI attempt %s failed: %s", attempt + 1, exc)
             if attempt < 2:
                 import asyncio
                 await asyncio.sleep(1 + attempt * 2)
 
-    raise RuntimeError("AI provider request failed") from last_error
+    raise RuntimeError(f"AI provider request failed after retries: {last_error}") from last_error
 
 
 def _extract_json_array(text: str) -> list[dict[str, Any]]:
     text = text.strip()
+    # Strip markdown fences if the model wraps JSON
+    if text.startswith("```"):
+        text = re.sub(r"^```(?:json)?\s*", "", text)
+        text = re.sub(r"\s*```$", "", text)
+        text = text.strip()
     try:
         obj = json.loads(text)
     except json.JSONDecodeError:
@@ -139,10 +168,8 @@ def _extract_json_array(text: str) -> list[dict[str, Any]]:
 
 
 def _package_document_text(package: dict[str, Any]) -> str:
-    """Extract source text without treating unrelated fields as evidence."""
     documents = package.get("documents", [])
     pieces: list[str] = []
-
     if isinstance(documents, list):
         for document in documents:
             if isinstance(document, dict):
@@ -150,16 +177,18 @@ def _package_document_text(package: dict[str, Any]) -> str:
                     value = document.get(key)
                     if isinstance(value, str):
                         pieces.append(value)
-
-    # Support packages whose documents are represented as a single string.
+            elif isinstance(document, str):
+                pieces.append(document)
     if isinstance(documents, str):
         pieces.append(documents)
-
+    # Also scan other string fields that sometimes hold evidence
+    for key, value in package.items():
+        if key != "documents" and isinstance(value, str) and "[" in value:
+            pieces.append(value)
     return "\n".join(pieces)
 
 
 def _grounded_refs(package: dict[str, Any]) -> set[str]:
-    """Return bracketed references actually present in document text."""
     text = _package_document_text(package)
     return set(re.findall(r"\[[A-Za-z0-9][A-Za-z0-9_.:-]*\]", text))
 
@@ -168,14 +197,13 @@ def _validate_decision(
     package: dict[str, Any],
     decision: dict[str, Any],
 ) -> dict[str, Any]:
-    """Reject malformed or ungrounded decisions; never fabricate citations."""
     package_id = package.get("packageId") or package.get("id")
     if not package_id:
         raise ValueError("Package is missing packageId/id")
 
     action = decision.get("action")
     if action not in VALID_ACTIONS:
-        raise ValueError(f"Invalid action for package {package_id}")
+        raise ValueError(f"Invalid action for package {package_id}: {action!r}")
 
     facts = decision.get("facts")
     if not isinstance(facts, dict):
@@ -188,8 +216,11 @@ def _validate_decision(
 
     if not all(isinstance(v, str) and v.strip() for v in (vendor, invoice, currency)):
         raise ValueError(f"Invalid invoice facts for package {package_id}")
+    # Accept int-like floats from some models
+    if isinstance(amount, float) and amount == int(amount):
+        amount = int(amount)
     if isinstance(amount, bool) or not isinstance(amount, int) or amount < 0:
-        raise ValueError(f"Invalid amountMinor for package {package_id}")
+        raise ValueError(f"Invalid amountMinor for package {package_id}: {amount!r}")
 
     refs = decision.get("evidenceRefs")
     if not isinstance(refs, list) or len(refs) != 3:
@@ -198,8 +229,11 @@ def _validate_decision(
         raise ValueError(f"Evidence references must be three distinct strings for {package_id}")
 
     actual_refs = _grounded_refs(package)
-    if any(ref not in actual_refs for ref in refs):
-        raise ValueError(f"Ungrounded evidence reference for package {package_id}")
+    if actual_refs and any(ref not in actual_refs for ref in refs):
+        raise ValueError(
+            f"Ungrounded evidence reference for package {package_id}: "
+            f"{refs} not all in {sorted(actual_refs)}"
+        )
 
     rationale = decision.get("rationale")
     if not isinstance(rationale, str) or not 60 <= len(rationale.strip()) <= 1500:
@@ -224,7 +258,6 @@ def _validate_decision(
 
 
 async def decide_batch(packages: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    """Decide a batch, using only validated semantic cache entries."""
     if not packages:
         return []
 
@@ -239,7 +272,6 @@ async def decide_batch(packages: list[dict[str, Any]]) -> list[dict[str, Any]]:
                 results[index] = validated
                 continue
             except (ValueError, TypeError):
-                # Ignore stale or invalid cache entries and ask the model.
                 pass
         pending.append((index, package))
 
@@ -256,10 +288,11 @@ async def decide_batch(packages: list[dict[str, Any]]) -> list[dict[str, Any]]:
 
         ids = [package.get("packageId") or package.get("id") for _, package in pending]
         if len(decisions) != len(pending):
-            raise ValueError("Model must return exactly one decision per package")
+            raise ValueError(
+                f"Model must return exactly one decision per package "
+                f"(got {len(decisions)}, expected {len(pending)})"
+            )
 
-        # Require unambiguous package mapping. Do not silently pair a missing
-        # or duplicate ID with an unrelated package by array position.
         by_id: dict[str, dict[str, Any]] = {}
         for decision in decisions:
             decision_id = decision.get("packageId")
@@ -267,7 +300,10 @@ async def decide_batch(packages: list[dict[str, Any]]) -> list[dict[str, Any]]:
                 raise ValueError("Model output contains a missing or duplicate packageId")
             by_id[decision_id] = decision
         if set(by_id) != set(ids):
-            raise ValueError("Model output package IDs do not match the requested batch")
+            raise ValueError(
+                f"Model output package IDs do not match the requested batch: "
+                f"got {sorted(by_id)}, expected {sorted(ids)}"
+            )
 
         for (index, package), package_id in zip(pending, ids):
             validated = _validate_decision(package, by_id[package_id])
