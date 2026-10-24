@@ -31,6 +31,21 @@ app = FastAPI(
     default_response_class=JSONResponse,
 )
 
+# Per-principal message locks so concurrent equivalent sends share one Task.
+_message_locks: Dict[str, asyncio.Lock] = {}
+_message_locks_guard = asyncio.Lock()
+
+
+async def _lock_for(principal: str, message_id: str) -> asyncio.Lock:
+    key = f"{principal}:{message_id}"
+    async with _message_locks_guard:
+        lock = _message_locks.get(key)
+        if lock is None:
+            lock = asyncio.Lock()
+            _message_locks[key] = lock
+        return lock
+
+
 
 @app.on_event("startup")
 async def startup() -> None:
@@ -145,6 +160,20 @@ async def message_send(
 
     digest = message_hash(message)
 
+    lock = await _lock_for(principal, message_id)
+    async with lock:
+        return await _message_send_locked(
+            principal, message, message_id, digest, body
+        )
+
+
+async def _message_send_locked(
+    principal: str,
+    message: Dict[str, Any],
+    message_id: str,
+    digest: str,
+    body: Dict[str, Any],
+):
     # Check idempotency before dispatching either message type.
     existing_id, existing_hash = await storage.check_idempotency(
         principal, message_id, digest
@@ -387,6 +416,11 @@ async def _continue(
 
     task = await storage.get_task(principal, task_id)
     if not task:
+        # Do not reveal whether the task exists for another principal.
+        raise HTTPException(404, GENERIC_NOT_FOUND["error"])
+
+    # Defense-in-depth: refuse if stored owner does not match (should be impossible).
+    if task.get("_principal") and task.get("_principal") != principal:
         raise HTTPException(404, GENERIC_NOT_FOUND["error"])
 
     if task.get("contextId") != context_id:
