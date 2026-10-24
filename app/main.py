@@ -355,7 +355,7 @@ async def _initial(
         await storage.save_task(task, principal)
         return _json({"task": _public(task)})
 
-        except Exception as exc:
+    except Exception as exc:
         # Log the real failure so Render logs show the root cause.
         import logging
         logging.getLogger("invoice_a2a").exception(
