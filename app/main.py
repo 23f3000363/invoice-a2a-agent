@@ -416,7 +416,7 @@ async def _continue(
     results = data.get("results")
     proposals = task.get("_proposals") or {}
 
-    if not isinstance(results, list) or len(results) != len(proposals):
+    if not isinstance(results, list):
         raise HTTPException(400, GENERIC_BAD_REQUEST["error"])
 
     seen = set()
@@ -448,12 +448,12 @@ async def _continue(
             or proposal["action"] != action
             or package_id not in by_package
             or outcome not in ("ACCEPTED", "REJECTED")
-            or not isinstance(nonce, str)
-            or not nonce
         ):
             raise HTTPException(400, GENERIC_BAD_REQUEST["error"])
 
         if outcome == "ACCEPTED":
+            if not isinstance(nonce, str) or not nonce:
+                raise HTTPException(400, GENERIC_BAD_REQUEST["error"])
             executions.append(
                 {
                     "packageId": package_id,
@@ -543,17 +543,18 @@ async def cancel_task(
     task_id: str,
     principal: str = Depends(require_principal),
     a2a_version: Optional[str] = Header(None, alias="A2A-Version"),
-    content_type: Optional[str] = Header(None, alias="Content-Type"),
 ):
     _version(a2a_version)
-    _media(content_type)
+    # Cancel has no body — do not require Content-Type.
 
     task = await storage.get_task(principal, task_id)
     if not task:
         raise HTTPException(404, GENERIC_NOT_FOUND["error"])
 
-    # Only tasks awaiting continuation are cancellable.
-    if task["status"]["state"] != TASK_STATE_INPUT_REQUIRED:
+    state = task["status"]["state"]
+    if state == TASK_STATE_CANCELED:
+        return _json(_public(task))
+    if state != TASK_STATE_INPUT_REQUIRED:
         raise HTTPException(409, GENERIC_CONFLICT["error"])
 
     canceled = dict(task)
