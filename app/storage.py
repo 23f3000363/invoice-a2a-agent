@@ -18,10 +18,14 @@ DB_PATH = os.getenv(
 
 def _connect() -> sqlite3.Connection:
     Path(DB_PATH).parent.mkdir(parents=True, exist_ok=True)
-    db = sqlite3.connect(DB_PATH, timeout=10, isolation_level=None)
+    db = sqlite3.connect(
+        DB_PATH, timeout=30, isolation_level=None, check_same_thread=False
+    )
     db.row_factory = sqlite3.Row
-    db.execute("PRAGMA busy_timeout=10000")
+    db.execute("PRAGMA busy_timeout=30000")
     db.execute("PRAGMA foreign_keys=ON")
+    db.execute("PRAGMA journal_mode=WAL")
+    db.execute("PRAGMA synchronous=NORMAL")
     return db
 
 
