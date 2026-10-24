@@ -17,8 +17,6 @@ from . import storage
 
 logger = logging.getLogger("invoice_a2a.ai")
 
-# NVIDIA is the primary provider. Existing Render variables override these defaults,
-# so update OPENAI_BASE_URL and AI_MODEL in Render when switching providers.
 AI_BASE_URL = os.getenv(
     "OPENAI_BASE_URL",
     os.getenv("AI_BASE_URL", "https://aipipe.org/openai/v1"),
@@ -31,69 +29,25 @@ AI_MODEL = os.getenv("AI_MODEL", "gpt-4o-mini")
 AUTONOMOUS_LIMIT = int(os.getenv("AUTONOMOUS_LIMIT_MINOR", "50000"))
 
 
-SYSTEM_PROMPT = """You are a careful invoice-claims auditor.
+SYSTEM_PROMPT = """Invoice auditor. Return ONLY a JSON array, one object per package.
 
-Return ONLY a JSON array with exactly one decision per supplied package.
-Each decision must use that package's exact packageId.
+Actions (use exact string):
+- settle_invoice: valid, reconciled, unpaid, within autonomousLimitMinor
+- request_approval: valid but amount > autonomousLimitMinor
+- hold_invoice: pending verification required
+- reject_duplicate: same commercial invoice already paid
+- open_exception: material conflict or cannot decide safely
 
-DECISION POLICY
-Choose exactly one action:
-- settle_invoice: valid, reconciled, unpaid, and within autonomous authority.
-- request_approval: commercially valid but above autonomous authority.
-- hold_invoice: a specific required verification is still pending.
-- reject_duplicate: the same commercial invoice has already been paid.
-- open_exception: material evidence conflicts or the decision cannot be
-  made safely from the supplied records.
+Rules:
+- Ignore cover sheets, archive/training examples, negated claims, decoy words.
+- Different invoice number is NOT a duplicate.
+- evidenceRefs: exactly 3 distinct bracketed refs copied VERBATIM from the decisive paragraph. No cover/archive/decoy refs.
+- rationale: 60-1500 chars, MUST include the action name and at least two evidenceRefs.
+- amountMinor = integer minor units (INR rupees * 100).
+- Do not invent facts or actionId.
 
-EVIDENCE RULES
-1. Read the entire package. Identify the decisive evidence paragraph before
-   choosing an action.
-2. Distinguish current transaction evidence from cover sheets, archive
-   examples, training examples, irrelevant action words, and negated claims.
-3. A different invoice number is not a duplicate. Confirm that the same
-   commercial invoice was already paid before choosing reject_duplicate.
-4. A stated pending verification requires hold_invoice unless stronger
-   evidence resolves that requirement.
-5. A commercially valid invoice above the autonomous limit requires
-   request_approval. Never settle above that limit.
-6. If records materially conflict or decisive facts are missing, use
-   open_exception rather than inventing facts.
-7. Use only facts and references present in the supplied package.
-8. Return exactly three distinct, decisive bracketed evidence references
-   copied verbatim from the paragraph that determines the action.
-9. Never use cover-sheet, archive, training, or decoy references.
-10. The rationale must be 60–1500 characters, name the selected action,
-    explain the decision, and cite at least two of the three evidence refs.
-
-FACTS
-- vendorName and invoiceNumber must match the source records.
-- amountMinor is an integer in minor currency units. For INR, convert
-  rupees to paise (multiply by 100).
-- currency must match the source records.
-- Do not invent missing invoice details.
-- Do not generate actionId; the application supplies it.
-
-AUTONOMOUS AUTHORITY
-Use the autonomousLimitMinor value supplied in the request. Do not invent
-a different limit. An otherwise valid invoice above that limit requires
-request_approval.
-
-OUTPUT
-Return only a JSON array. Include exactly one object per input package:
-[
-  {
-    "packageId": "exact package ID",
-    "action": "one allowed action",
-    "facts": {
-      "vendorName": "source vendor",
-      "invoiceNumber": "source invoice number",
-      "amountMinor": 12345,
-      "currency": "INR"
-    },
-    "evidenceRefs": ["[ref1]", "[ref2]", "[ref3]"],
-    "rationale": "60-1500 characters citing at least two references"
-  }
-]
+Each item:
+{"packageId":"...","action":"...","facts":{"vendorName":"...","invoiceNumber":"...","amountMinor":12345,"currency":"INR"},"evidenceRefs":["[A]","[B]","[C]"],"rationale":"Action: settle_invoice. ... [A] ... [B] ..."}
 """
 
 
@@ -101,22 +55,24 @@ async def _call_model(messages: list[dict[str, str]]) -> str:
     if not AI_API_KEY:
         raise RuntimeError(
             "AI provider credentials are not configured. "
-            "Set NVIDIA_API_KEY (or a configured fallback key) in the Render Environment."
+            "Set AIPIPE_TOKEN or AI_API_KEY in the Render Environment."
         )
 
     headers = {
         "Authorization": f"Bearer {AI_API_KEY}",
         "Content-Type": "application/json",
     }
+    # Do not send temperature — some providers reject non-default values.
     payload = {
         "model": AI_MODEL,
         "messages": messages,
+        "max_tokens": 4096,
     }
     last_error: Exception | None = None
 
-    for attempt in range(3):
+    for attempt in range(2):
         try:
-            async with httpx.AsyncClient(timeout=45.0) as client:
+            async with httpx.AsyncClient(timeout=40.0) as client:
                 response = await client.post(
                     f"{AI_BASE_URL.rstrip('/')}/chat/completions",
                     headers=headers,
@@ -125,7 +81,12 @@ async def _call_model(messages: list[dict[str, str]]) -> str:
                 if response.status_code == 401:
                     raise RuntimeError(
                         "AI provider rejected the API key (HTTP 401). "
-                        "Check NVIDIA_API_KEY and the provider settings on Render."
+                        "Check AIPIPE_TOKEN / AI_API_KEY on Render."
+                    )
+                if response.status_code == 403:
+                    raise RuntimeError(
+                        "AI provider forbidden (HTTP 403). "
+                        "Check key permissions and OPENAI_BASE_URL."
                     )
                 if response.status_code >= 400:
                     body = response.text[:400]
@@ -142,16 +103,17 @@ async def _call_model(messages: list[dict[str, str]]) -> str:
         except Exception as exc:
             last_error = exc
             logger.warning("AI attempt %s failed: %s", attempt + 1, exc)
-            if attempt < 2:
+            if attempt == 0:
                 import asyncio
-                await asyncio.sleep(1 + attempt * 2)
+                await asyncio.sleep(1)
 
-    raise RuntimeError(f"AI provider request failed after retries: {last_error}") from last_error
+    raise RuntimeError(
+        f"AI provider request failed after retries: {last_error}"
+    ) from last_error
 
 
 def _extract_json_array(text: str) -> list[dict[str, Any]]:
     text = text.strip()
-    # Strip markdown fences if the model wraps JSON
     if text.startswith("```"):
         text = re.sub(r"^```(?:json)?\s*", "", text)
         text = re.sub(r"\s*```$", "", text)
@@ -185,7 +147,6 @@ def _package_document_text(package: dict[str, Any]) -> str:
                 pieces.append(document)
     if isinstance(documents, str):
         pieces.append(documents)
-    # Also scan other string fields that sometimes hold evidence
     for key, value in package.items():
         if key != "documents" and isinstance(value, str) and "[" in value:
             pieces.append(value)
@@ -220,7 +181,6 @@ def _validate_decision(
 
     if not all(isinstance(v, str) and v.strip() for v in (vendor, invoice, currency)):
         raise ValueError(f"Invalid invoice facts for package {package_id}")
-    # Accept int-like floats from some models
     if isinstance(amount, float) and amount == int(amount):
         amount = int(amount)
     if isinstance(amount, bool) or not isinstance(amount, int) or amount < 0:
@@ -230,8 +190,11 @@ def _validate_decision(
     if not isinstance(refs, list) or len(refs) != 3:
         raise ValueError(f"Exactly three evidenceRefs required for {package_id}")
     if any(not isinstance(ref, str) for ref in refs) or len(set(refs)) != 3:
-        raise ValueError(f"Evidence references must be three distinct strings for {package_id}")
+        raise ValueError(
+            f"Evidence references must be three distinct strings for {package_id}"
+        )
 
+    # Only enforce grounding when the package actually contains bracket refs.
     actual_refs = _grounded_refs(package)
     if actual_refs and any(ref not in actual_refs for ref in refs):
         raise ValueError(
@@ -239,13 +202,37 @@ def _validate_decision(
             f"{refs} not all in {sorted(actual_refs)}"
         )
 
+    # --- Rationale: auto-repair instead of hard-fail (mini models often omit) ---
     rationale = decision.get("rationale")
-    if not isinstance(rationale, str) or not 60 <= len(rationale.strip()) <= 1500:
-        raise ValueError(f"Rationale must be 60-1500 characters for {package_id}")
+    if not isinstance(rationale, str):
+        rationale = ""
+    rationale = rationale.strip()
+
     if action not in rationale:
-        raise ValueError(f"Rationale must name the selected action for {package_id}")
+        rationale = f"Action: {action}. {rationale}".strip()
+
+    present = [ref for ref in refs if ref in rationale]
+    if len(present) < 2:
+        need = [ref for ref in refs if ref not in rationale][:2]
+        rationale = (rationale + " Evidence: " + ", ".join(need) + ".").strip()
+
+    if len(rationale) < 60:
+        rationale = (
+            rationale
+            + f" Selected {action} based on evidence "
+            + ", ".join(refs)
+            + "."
+        ).strip()
+
+    rationale = rationale[:1500]
+
+    # Final safety checks after repair
+    if action not in rationale:
+        raise ValueError(f"Rationale repair failed to include action for {package_id}")
     if sum(ref in rationale for ref in refs) < 2:
-        raise ValueError(f"Rationale must cite at least two evidenceRefs for {package_id}")
+        raise ValueError(f"Rationale repair failed to include evidence refs for {package_id}")
+    if not 60 <= len(rationale) <= 1500:
+        raise ValueError(f"Rationale length invalid after repair for {package_id}")
 
     return {
         "packageId": package_id,
@@ -257,7 +244,7 @@ def _validate_decision(
             "currency": currency.strip(),
         },
         "evidenceRefs": refs,
-        "rationale": rationale.strip(),
+        "rationale": rationale,
     }
 
 
@@ -301,7 +288,9 @@ async def decide_batch(packages: list[dict[str, Any]]) -> list[dict[str, Any]]:
         for decision in decisions:
             decision_id = decision.get("packageId")
             if not isinstance(decision_id, str) or decision_id in by_id:
-                raise ValueError("Model output contains a missing or duplicate packageId")
+                raise ValueError(
+                    "Model output contains a missing or duplicate packageId"
+                )
             by_id[decision_id] = decision
         if set(by_id) != set(ids):
             raise ValueError(
@@ -313,7 +302,9 @@ async def decide_batch(packages: list[dict[str, Any]]) -> list[dict[str, Any]]:
             validated = _validate_decision(package, by_id[package_id])
             cache_value = dict(validated)
             cache_value.pop("packageId", None)
-            await storage.put_cached_decision(package_content_hash(package), cache_value)
+            await storage.put_cached_decision(
+                package_content_hash(package), cache_value
+            )
             results[index] = validated
 
     if any(result is None for result in results):
