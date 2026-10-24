@@ -199,25 +199,33 @@ async def transition_task(
     principal: str,
     expected_state: str,
 ) -> bool:
-    """Change task state only when its current state matches."""
+    """Change task state only when its current state matches (atomic)."""
     with _connect() as db:
-        cur = db.execute(
-            """
-            UPDATE tasks
-            SET state=?, history_json=?, artifacts_json=?,
-                proposals_json=?, updated_at=?
-            WHERE task_id=? AND principal=? AND state=?
-            """,
-            (
-                task["status"]["state"],
-                json.dumps(task.get("history", []), ensure_ascii=False),
-                json.dumps(task.get("artifacts", []), ensure_ascii=False),
-                json.dumps(task.get("_proposals"), ensure_ascii=False)
-                if task.get("_proposals") else None,
-                time.time(), task["id"], principal, expected_state,
-            ),
-        )
-        return cur.rowcount == 1
+        db.execute("BEGIN IMMEDIATE")
+        try:
+            cur = db.execute(
+                """
+                UPDATE tasks
+                SET state=?, history_json=?, artifacts_json=?,
+                    proposals_json=?, updated_at=?
+                WHERE task_id=? AND principal=? AND state=?
+                """,
+                (
+                    task["status"]["state"],
+                    json.dumps(task.get("history", []), ensure_ascii=False),
+                    json.dumps(task.get("artifacts", []), ensure_ascii=False),
+                    json.dumps(task.get("_proposals"), ensure_ascii=False)
+                    if task.get("_proposals") else None,
+                    time.time(), task["id"], principal, expected_state,
+                ),
+            )
+            ok = cur.rowcount == 1
+            db.execute("COMMIT")
+            return ok
+        except Exception:
+            if db.in_transaction:
+                db.execute("ROLLBACK")
+            raise
 
 
 async def check_idempotency(
