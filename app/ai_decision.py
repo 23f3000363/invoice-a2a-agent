@@ -33,7 +33,7 @@ SYSTEM_PROMPT = """Invoice auditor. Return ONLY a JSON array, one object per pac
 
 Actions (use exact string):
 - settle_invoice: valid, reconciled, unpaid, within autonomousLimitMinor
-- request_approval: valid but amount > autonomousLimitMinor
+- request_approval: valid but amount > autonomousLimitMinor (NEVER settle above limit)
 - hold_invoice: pending verification required
 - reject_duplicate: same commercial invoice already paid
 - open_exception: material conflict or cannot decide safely
@@ -233,6 +233,17 @@ def _validate_decision(
         raise ValueError(f"Rationale repair failed to include evidence refs for {package_id}")
     if not 60 <= len(rationale) <= 1500:
         raise ValueError(f"Rationale length invalid after repair for {package_id}")
+
+    # Safety clamp: never settle above autonomous authority.
+    if amount > AUTONOMOUS_LIMIT and action == "settle_invoice":
+        action = "request_approval"
+        if "request_approval" not in rationale:
+            rationale = (
+                f"Action: request_approval. Amount {amount} exceeds autonomous "
+                f"limit {AUTONOMOUS_LIMIT}. " + rationale
+            )[:1500]
+        if action not in rationale:
+            rationale = f"Action: request_approval. {rationale}"[:1500]
 
     return {
         "packageId": package_id,
