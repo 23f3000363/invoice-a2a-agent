@@ -355,7 +355,12 @@ async def _initial(
         await storage.save_task(task, principal)
         return _json({"task": _public(task)})
 
-    except Exception:
+        except Exception as exc:
+        # Log the real failure so Render logs show the root cause.
+        import logging
+        logging.getLogger("invoice_a2a").exception(
+            "Decision failed for batch: %s", exc
+        )
         # Keep the reservation terminal and replayable; do not trigger a
         # second model call by retrying the same message ID.
         failed = {
@@ -370,7 +375,7 @@ async def _initial(
             503,
             {
                 "code": "DECISION_SERVICE_UNAVAILABLE",
-                "message": "Could not evaluate this batch",
+                "message": f"Could not evaluate this batch: {type(exc).__name__}: {exc}",
             },
         )
 
