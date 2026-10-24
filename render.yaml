@@ -1,0 +1,24 @@
+services:
+  - type: web
+    name: invoice-a2a
+    runtime: python
+    plan: free
+    buildCommand: pip install -r requirements.txt
+    startCommand: uvicorn app.main:app --host 0.0.0.0 --port $PORT
+    envVars:
+      - key: PUBLIC_BASE_URL
+        sync: false
+      - key: AIPIPE_TOKEN
+        sync: false
+      - key: OPENAI_BASE_URL
+        value: https://aipipe.org/openai/v1
+      - key: AI_MODEL
+        value: gpt-5-nano
+      - key: DATABASE_PATH
+        value: /opt/render/project/src/data/invoice_a2a.db
+      - key: AUTONOMOUS_LIMIT_MINOR
+        value: "50000"
+    disk:
+      name: invoice-data
+      mountPath: /opt/render/project/src/data
+      sizeGB: 1

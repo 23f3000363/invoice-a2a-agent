@@ -1,0 +1,43 @@
+{
+  "message": {
+    "messageId": "msg-sample-001",
+    "role": "ROLE_USER",
+    "parts": [
+      {
+        "mediaType": "application/vnd.ga5.invoice-claim-batch+json",
+        "data": {
+          "batchId": "batch-sample-001",
+          "policyRevision": "2026-10-01",
+          "packages": [
+            {
+              "packageId": "pkg-001",
+              "documents": [
+                {
+                  "type": "invoice",
+                  "text": "Vendor: Acme Supplies Pvt Ltd. Invoice Number: INV-2026-8841. Amount: 12500.00 INR. [DEC-SETTLE-OK] Status: Goods received and matched to PO-9912. [PO-MATCH-CONFIRMED] No prior payment recorded for this invoice number. [NO-PRIOR-PAYMENT] Cover sheet example (ignore): settle_invoice training decoy."
+                }
+              ]
+            },
+            {
+              "packageId": "pkg-002",
+              "documents": [
+                {
+                  "type": "invoice",
+                  "text": "Vendor: Global Tech. Invoice: GT-77821. Amount: 185000.00 INR. [HIGH-VALUE] Commercially valid and reconciled. [RECONCILED] Exceeds autonomous limit of 50000 minor units. [OVER-LIMIT] Archive example (ignore): reject_duplicate."
+                }
+              ]
+            }
+          ]
+        }
+      }
+    ]
+  },
+  "configuration": {
+    "returnImmediately": false,
+    "historyLength": 20,
+    "acceptedOutputModes": [
+      "application/vnd.ga5.invoice-action-proposals+json",
+      "application/vnd.ga5.invoice-action-receipts+json"
+    ]
+  }
+}

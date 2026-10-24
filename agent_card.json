@@ -1,0 +1,39 @@
+{
+  "name": "Invoice Action Agent",
+  "description": "Evidence-based invoice decision agent that proposes settle_invoice / request_approval / hold_invoice / reject_duplicate / open_exception actions and executes only accepted proposals under A2A 1.0. Cites exact evidence, enforces approval limits, prevents duplicate payments, and stores task state for safe retries.",
+  "version": "1.0.0",
+  "capabilities": {
+    "streaming": false,
+    "pushNotifications": false,
+    "extendedAgentCard": false
+  },
+  "defaultInputModes": [
+    "application/vnd.ga5.invoice-claim-batch+json"
+  ],
+  "defaultOutputModes": [
+    "application/vnd.ga5.invoice-action-proposals+json",
+    "application/vnd.ga5.invoice-action-receipts+json"
+  ],
+  "skills": [
+    {
+      "id": "invoice_action_agent",
+      "name": "Invoice Action Agent",
+      "description": "Reads invoice claim packages, chooses exactly one typed action per package with decisive evidence citations from the documents, returns proposals in TASK_STATE_INPUT_REQUIRED, and executes only ACCEPTED results while preserving idempotency, principal isolation, and cancel/receipt atomicity.",
+      "tags": [
+        "invoice",
+        "finance",
+        "a2a",
+        "evidence",
+        "approval",
+        "settlement"
+      ]
+    }
+  ],
+  "supportedInterfaces": [
+    {
+      "url": "https://REPLACE-WITH-YOUR-PUBLIC-HOST/a2a",
+      "protocolBinding": "HTTP+JSON",
+      "protocolVersion": "1.0"
+    }
+  ]
+}
