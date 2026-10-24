@@ -157,7 +157,8 @@ async def message_send(
         existing = await storage.get_task(principal, existing_id)
 
         if existing and existing["status"]["state"] == TASK_STATE_WORKING:
-            for _ in range(400):
+            # Concurrent equivalent request: wait for creator to finish.
+            for _ in range(600):
                 await asyncio.sleep(0.1)
                 existing = await storage.get_task(principal, existing_id)
                 if (
@@ -166,17 +167,8 @@ async def message_send(
                 ):
                     break
 
-        if existing and existing["status"]["state"] != TASK_STATE_WORKING:
-            return _json({"task": _public(existing)})
-
         if existing:
-            raise HTTPException(
-                503,
-                {
-                    "code": "TASK_STILL_PROCESSING",
-                    "message": "Task is still processing; retry the same messageId",
-                },
-            )
+            return _json({"task": _public(existing)})
 
     parts = message.get("parts")
     if not isinstance(parts, list) or len(parts) != 1:
@@ -252,22 +244,16 @@ async def _initial(
 
         existing = await storage.get_task(principal, existing_id)
 
-        for _ in range(400):
+        for _ in range(600):
             if not existing or existing["status"]["state"] != TASK_STATE_WORKING:
                 break
             await asyncio.sleep(0.1)
             existing = await storage.get_task(principal, existing_id)
 
-        if existing and existing["status"]["state"] != TASK_STATE_WORKING:
+        if existing:
             return _json({"task": _public(existing)})
 
-        raise HTTPException(
-            503,
-            {
-                "code": "TASK_STILL_PROCESSING",
-                "message": "Task is still processing; retry the same messageId",
-            },
-        )
+        raise HTTPException(409, GENERIC_CONFLICT["error"])
 
     try:
         decisions = await decide_batch(packages)
@@ -508,9 +494,16 @@ async def _continue(
             if existing_task:
                 return _json({"task": _public(existing_task)})
 
+        # Cancel likely won — return current task or 409
+        current = await storage.get_task(principal, task_id)
+        if current:
+            return _json({"task": _public(current)}) if current["status"]["state"] in (
+                TASK_STATE_COMPLETED, TASK_STATE_CANCELED
+            ) else (_json(GENERIC_CONFLICT, 409))
         raise HTTPException(409, GENERIC_CONFLICT["error"])
 
-    return _json({"task": _public(updated_task)})
+    final = await storage.get_task(principal, task_id)
+    return _json({"task": _public(final or updated_task)})
 
 
 @app.get("/a2a/tasks/{task_id}")
