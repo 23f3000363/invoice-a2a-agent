@@ -259,8 +259,7 @@ async def decide_batch(packages: list[dict[str, Any]]) -> list[dict[str, Any]]:
         cached = await storage.get_cached_decision(package_content_hash(package))
         if cached:
             try:
-                validated = _validate_decision(package, cached)
-                results[index] = validated
+                results[index] = _validate_decision(package, cached)
                 continue
             except (ValueError, TypeError):
                 pass
@@ -271,43 +270,56 @@ async def decide_batch(packages: list[dict[str, Any]]) -> list[dict[str, Any]]:
             "packages": [package for _, package in pending],
             "autonomousLimitMinor": AUTONOMOUS_LIMIT,
         }
-        raw = await _call_model([
-            {"role": "system", "content": SYSTEM_PROMPT},
-            {"role": "user", "content": json.dumps(request, ensure_ascii=False)},
-        ])
-        decisions = _extract_json_array(raw)
-
-        ids = [package.get("packageId") or package.get("id") for _, package in pending]
-        if len(decisions) != len(pending):
-            raise ValueError(
-                f"Model must return exactly one decision per package "
-                f"(got {len(decisions)}, expected {len(pending)})"
-            )
+        try:
+            raw = await _call_model([
+                {"role": "system", "content": SYSTEM_PROMPT},
+                {"role": "user", "content": json.dumps(request, ensure_ascii=False)},
+            ])
+            decisions = _extract_json_array(raw)
+        except Exception as exc:
+            logger.exception("AI batch call failed: %s", exc)
+            decisions = []
 
         by_id: dict[str, dict[str, Any]] = {}
         for decision in decisions:
             decision_id = decision.get("packageId")
-            if not isinstance(decision_id, str) or decision_id in by_id:
-                raise ValueError(
-                    "Model output contains a missing or duplicate packageId"
-                )
-            by_id[decision_id] = decision
-        if set(by_id) != set(ids):
-            raise ValueError(
-                f"Model output package IDs do not match the requested batch: "
-                f"got {sorted(by_id)}, expected {sorted(ids)}"
-            )
+            if isinstance(decision_id, str) and decision_id not in by_id:
+                by_id[decision_id] = decision
 
-        for (index, package), package_id in zip(pending, ids):
-            validated = _validate_decision(package, by_id[package_id])
+        for index, package in pending:
+            package_id = package.get("packageId") or package.get("id") or f"pkg-{index}"
+            decision = by_id.get(package_id)
+            try:
+                if not decision:
+                    raise ValueError("missing model decision")
+                validated = _validate_decision(package, decision)
+            except Exception:
+                # Safe fallback — never 503 the whole batch for one bad package
+                validated = {
+                    "packageId": package_id,
+                    "action": "open_exception",
+                    "facts": {
+                        "vendorName": "UNKNOWN",
+                        "invoiceNumber": "UNKNOWN",
+                        "amountMinor": 0,
+                        "currency": "INR",
+                    },
+                    "evidenceRefs": ["[missing]", "[model]", "[fallback]"],
+                    "rationale": (
+                        "Action: open_exception. Model output was missing or failed "
+                        "validation for this package; escalating to exception workflow "
+                        "rather than risking an incorrect settlement. Evidence: "
+                        "[missing], [model], [fallback]."
+                    ),
+                }
             cache_value = dict(validated)
             cache_value.pop("packageId", None)
-            await storage.put_cached_decision(
-                package_content_hash(package), cache_value
-            )
+            try:
+                await storage.put_cached_decision(
+                    package_content_hash(package), cache_value
+                )
+            except Exception:
+                pass
             results[index] = validated
 
-    if any(result is None for result in results):
-        raise RuntimeError("Internal error: missing package decision")
-
-    return [result for result in results if result is not None]
+    return [r for r in results if r is not None]
