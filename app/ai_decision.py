@@ -21,17 +21,13 @@ logger = logging.getLogger("invoice_a2a.ai")
 # so update OPENAI_BASE_URL and AI_MODEL in Render when switching providers.
 AI_BASE_URL = os.getenv(
     "OPENAI_BASE_URL",
-    os.getenv("AI_BASE_URL", "https://integrate.api.nvidia.com/v1"),
-).strip().rstrip("/")
-AI_API_KEY = (
-    os.getenv("NVIDIA_API_KEY")
-    or os.getenv("AIPIPE_TOKEN")
-    or os.getenv("AI_API_KEY", "")
+    os.getenv("AI_BASE_URL", "https://aipipe.org/openai/v1"),
+)
+AI_API_KEY = os.getenv(
+    "AIPIPE_TOKEN",
+    os.getenv("AI_API_KEY", ""),
 ).strip()
-AI_MODEL = os.getenv(
-    "AI_MODEL",
-    "nvidia/nemotron-3.5-lightning-30b-a3b",
-).strip()
+AI_MODEL = os.getenv("AI_MODEL", "gpt-4o-mini")
 AUTONOMOUS_LIMIT = int(os.getenv("AUTONOMOUS_LIMIT_MINOR", "50000"))
 
 
