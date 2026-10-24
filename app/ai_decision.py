@@ -106,7 +106,6 @@ async def _call_model(messages: list[dict[str, str]]) -> str:
     payload = {
         "model": AI_MODEL,
         "messages": messages,
-        "temperature": 0.1,
     }
     last_error: Exception | None = None
 
